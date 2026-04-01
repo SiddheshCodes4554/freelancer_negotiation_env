@@ -1,12 +1,9 @@
-"""Run deterministic LLM inference across all freelancer negotiation benchmark tasks.
+"""Submission inference runner for freelancer negotiation benchmark.
 
-Environment variables:
-- API_BASE_URL: OpenAI-compatible endpoint URL for the LLM API.
-- MODEL_NAME: Model identifier to use for chat completions.
-- HF_TOKEN: API token used as OpenAI client api_key.
-
-Optional:
-- OPENENV_BASE_URL: Base URL of a running OpenEnv server (default: http://localhost:8000).
+This script is intentionally formatted to satisfy submission logging constraints:
+- [START] task=<task_name> env=<benchmark> model=<model_name>
+- [STEP] step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
+- [END] success=<true|false> steps=<n> rewards=<r1,r2,...,rn>
 """
 
 from __future__ import annotations
@@ -22,10 +19,20 @@ from openai import OpenAI
 from freelancer_negotiation_env import FreelancerNegotiationAction, FreelancerNegotiationEnv
 from freelancer_negotiation_env.models import FreelancerNegotiationAction as ActionModel
 from freelancer_negotiation_env.models import NegotiationActionType
-from freelancer_negotiation_env.tasks import EpisodeResult, TaskDefinition, get_tasks, grade_task
+from freelancer_negotiation_env.tasks import TaskDefinition, get_tasks, grade_task
 
+# Required by submission guidance when from_docker_image() mode is used.
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
+
+API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+HF_TOKEN = os.getenv("HF_TOKEN")
+
+OPENENV_BASE_URL = os.getenv("OPENENV_BASE_URL", "http://localhost:8000")
+BENCHMARK_NAME = "freelancer_negotiation_env"
 MAX_STEPS_PER_TASK = 8
 RANDOM_SEED = 7
+SUCCESS_SCORE_THRESHOLD = 0.6
 
 
 @dataclass
@@ -34,29 +41,41 @@ class TaskRunSummary:
     total_reward: float
     grader_score: float
     steps: int
-    decision: str
+    success: bool
 
 
-def _required_env(name: str) -> str:
-    value = os.getenv(name)
-    if not value:
-        raise RuntimeError(f"Missing required environment variable: {name}")
-    return value
+def _required_token() -> str:
+    token = HF_TOKEN or os.getenv("API_KEY")
+    if not token:
+        raise RuntimeError("Missing required environment variable: HF_TOKEN")
+    return token
 
 
-def _log_start(payload: dict[str, object]) -> None:
-    """Emit run-start log in required structured format."""
-    print(f"[START] {json.dumps(payload, ensure_ascii=True)}")
+def _bool_text(value: bool) -> str:
+    return "true" if value else "false"
 
 
-def _log_step(payload: dict[str, object]) -> None:
-    """Emit per-step log in required structured format."""
-    print(f"[STEP] {json.dumps(payload, ensure_ascii=True)}")
+def _escape_field(value: str) -> str:
+    """Keep single-line output for strict parser compatibility."""
+    return value.replace("\n", " ").replace("\r", " ").strip()
 
 
-def _log_end(payload: dict[str, object]) -> None:
-    """Emit run-end log in required structured format."""
-    print(f"[END] {json.dumps(payload, ensure_ascii=True)}")
+def _log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+
+def _log_step(step: int, action: str, reward: float, done: bool, error: str | None) -> None:
+    error_value = _escape_field(error) if error else "null"
+    action_value = _escape_field(action)
+    print(
+        f"[STEP] step={step} action={action_value} reward={reward:.2f} done={_bool_text(done)} error={error_value}",
+        flush=True,
+    )
+
+
+def _log_end(success: bool, steps: int, rewards: list[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(f"[END] success={_bool_text(success)} steps={steps} rewards={rewards_str}", flush=True)
 
 
 def _build_policy_prompt(task: TaskDefinition, observation: dict[str, object], step_index: int) -> str:
@@ -139,7 +158,6 @@ def _llm_action(
 
 
 def _observation_to_dict(obs: object) -> dict[str, object]:
-    # Pydantic model_dump is available for Pydantic v2 models.
     if hasattr(obs, "model_dump"):
         return obs.model_dump()  # type: ignore[no-any-return]
     return {
@@ -151,127 +169,102 @@ def _observation_to_dict(obs: object) -> dict[str, object]:
     }
 
 
-def run_task(
-    env: FreelancerNegotiationEnv,
-    llm_client: OpenAI,
-    model_name: str,
-    task: TaskDefinition,
-) -> TaskRunSummary:
-    reset_result = env.reset()
-    obs = reset_result.observation
+def _extract_step_error(obs: object) -> str | None:
+    metadata = getattr(obs, "metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    info = metadata.get("info")
+    if not isinstance(info, dict):
+        return None
+    error = info.get("error")
+    if error is None:
+        return None
+    return str(error)
 
+
+def run_task(env: FreelancerNegotiationEnv, llm_client: OpenAI, model_name: str, task: TaskDefinition) -> TaskRunSummary:
+    rewards: list[float] = []
+    steps_taken = 0
+
+    _log_start(task=task.task_id, env=BENCHMARK_NAME, model=model_name)
+
+    success = False
     total_reward = 0.0
-    last_decision: str = "negotiate"
-    final_price: float | None = None
-    step_count = 0
+    grader_score = 0.0
 
-    for step_index in range(1, MAX_STEPS_PER_TASK + 1):
-        obs_dict = _observation_to_dict(obs)
-        action = _llm_action(
-            client=llm_client,
-            model_name=model_name,
-            task=task,
-            observation=obs_dict,
-            step_index=step_index,
+    try:
+        reset_result = env.reset()
+        obs = reset_result.observation
+
+        final_price: float | None = None
+        decision = "negotiate"
+
+        for step_index in range(1, MAX_STEPS_PER_TASK + 1):
+            obs_dict = _observation_to_dict(obs)
+            action = _llm_action(
+                client=llm_client,
+                model_name=model_name,
+                task=task,
+                observation=obs_dict,
+                step_index=step_index,
+            )
+
+            step_result = env.step(action)
+            obs = step_result.observation
+            steps_taken = step_index
+            decision = action.action_type.value
+
+            step_reward = float(step_result.reward or 0.0)
+            total_reward += step_reward
+            rewards.append(step_reward)
+
+            state_obj = getattr(obs, "negotiation_state", None)
+            if hasattr(state_obj, "current_price"):
+                final_price = float(state_obj.current_price)
+
+            done = bool(getattr(obs, "done", False) or step_result.done)
+            error = _extract_step_error(obs)
+            action_str = f"{decision}:{action.message}"
+            _log_step(step=step_index, action=action_str, reward=step_reward, done=done, error=error)
+
+            if done:
+                break
+
+        from freelancer_negotiation_env.tasks import EpisodeResult
+
+        episode_result = EpisodeResult(
+            final_price=final_price,
+            decision=decision,  # type: ignore[arg-type]
+            conversation_history=list(getattr(obs, "conversation_history", [])),
+            step_count=steps_taken,
+            client_type=str(getattr(obs, "metadata", {}).get("client_type", "normal")),
         )
+        grader_score = float(grade_task(task.task_id, episode_result))
+        success = grader_score >= SUCCESS_SCORE_THRESHOLD
 
-        step_result = env.step(action)
-        obs = step_result.observation
-        step_count = step_index
-        last_decision = action.action_type.value
-        step_reward = float(step_result.reward or 0.0)
-        total_reward += step_reward
-
-        state_obj = getattr(obs, "negotiation_state", None)
-        if hasattr(state_obj, "current_price"):
-            final_price = float(state_obj.current_price)
-
-        done = bool(getattr(obs, "done", False) or step_result.done)
-        _log_step(
-            {
-                "task_id": task.task_id,
-                "step": step_index,
-                "action_type": last_decision,
-                "reward": round(step_reward, 4),
-                "done": done,
-            }
+        return TaskRunSummary(
+            task_id=task.task_id,
+            total_reward=round(total_reward, 3),
+            grader_score=round(grader_score, 4),
+            steps=steps_taken,
+            success=success,
         )
-        if done:
-            break
-
-    history = list(getattr(obs, "conversation_history", []))
-
-    episode_result = EpisodeResult(
-        final_price=final_price,
-        decision=last_decision,  # type: ignore[arg-type]
-        conversation_history=history,
-        step_count=step_count,
-        client_type=str(getattr(obs, "metadata", {}).get("client_type", "normal")),
-    )
-    grader_score = grade_task(task.task_id, episode_result)
-
-    return TaskRunSummary(
-        task_id=task.task_id,
-        total_reward=round(total_reward, 3),
-        grader_score=round(grader_score, 4),
-        steps=step_count,
-        decision=last_decision,
-    )
+    finally:
+        _log_end(success=success, steps=steps_taken, rewards=rewards)
 
 
 def main() -> None:
     random.seed(RANDOM_SEED)
-    t0 = perf_counter()
+    _ = perf_counter()  # Keep deterministic seed behavior while avoiding noisy stdout.
 
-    api_base_url = _required_env("API_BASE_URL")
-    model_name = _required_env("MODEL_NAME")
-    hf_token = _required_env("HF_TOKEN")
-
-    openenv_base_url = os.getenv("OPENENV_BASE_URL", "http://localhost:8000")
-
-    llm_client = OpenAI(base_url=api_base_url, api_key=hf_token)
-
-    _log_start(
-        {
-            "seed": RANDOM_SEED,
-            "model": model_name,
-            "api_base_url": api_base_url,
-            "openenv_base_url": openenv_base_url,
-            "max_steps_per_task": MAX_STEPS_PER_TASK,
-            "tasks": [task.task_id for task in get_tasks()],
-        }
-    )
+    token = _required_token()
+    llm_client = OpenAI(base_url=API_BASE_URL, api_key=token)
 
     summaries: list[TaskRunSummary] = []
-    client = FreelancerNegotiationEnv(base_url=openenv_base_url)
+    client = FreelancerNegotiationEnv(base_url=OPENENV_BASE_URL)
     with client.sync() as env:
         for task in get_tasks():
-            summary = run_task(env=env, llm_client=llm_client, model_name=model_name, task=task)
-            summaries.append(summary)
-            _log_step(
-                {
-                    "task_id": summary.task_id,
-                    "event": "task_complete",
-                    "steps": summary.steps,
-                    "decision": summary.decision,
-                    "total_reward": round(summary.total_reward, 4),
-                    "grader_score": round(summary.grader_score, 4),
-                }
-            )
-
-    final_score = sum(s.grader_score for s in summaries) / max(len(summaries), 1)
-    total_reward = sum(s.total_reward for s in summaries)
-    elapsed_seconds = round(perf_counter() - t0, 3)
-
-    _log_end(
-        {
-            "final_score": round(final_score, 4),
-            "total_reward": round(total_reward, 4),
-            "task_scores": {s.task_id: s.grader_score for s in summaries},
-            "task_rewards": {s.task_id: s.total_reward for s in summaries},
-            "elapsed_seconds": elapsed_seconds,
-        }
-    )
+            summaries.append(run_task(env=env, llm_client=llm_client, model_name=MODEL_NAME, task=task))
 
 
 if __name__ == "__main__":

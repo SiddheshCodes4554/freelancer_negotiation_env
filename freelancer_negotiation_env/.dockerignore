@@ -1,24 +1,21 @@
 # Python caches
 __pycache__/
 *.py[cod]
+.pytest_cache/
 
 # Virtual environments
 .venv/
-*/.venv/
+venv/
+
+# VCS and editor files
+.git/
+.gitignore
+.vscode/
 
 # Build artifacts
 *.egg-info/
-.eggs/
-build/
 dist/
+build/
 
-# Editor/OS
-.vscode/
-.DS_Store
-Thumbs.db
-
-# Temp scripts/logs
-_smoke_*.py
-
-# Secrets
+# Local env files
 .env
