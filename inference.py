@@ -13,6 +13,7 @@ import os
 import random
 from dataclasses import dataclass
 from time import perf_counter
+from typing import Any
 
 from openai import OpenAI
 
@@ -182,7 +183,7 @@ def _extract_step_error(obs: object) -> str | None:
     return str(error)
 
 
-def run_task(env: FreelancerNegotiationEnv, llm_client: OpenAI, model_name: str, task: TaskDefinition) -> TaskRunSummary:
+def run_task(env: Any, llm_client: OpenAI, model_name: str, task: TaskDefinition) -> TaskRunSummary:
     rewards: list[float] = []
     steps_taken = 0
 
@@ -194,7 +195,9 @@ def run_task(env: FreelancerNegotiationEnv, llm_client: OpenAI, model_name: str,
 
     try:
         reset_result = env.reset()
-        obs = reset_result.observation
+        obs = getattr(reset_result, "observation", None)
+        if obs is None:
+            raise RuntimeError("reset() did not return an observation")
 
         final_price: float | None = None
         decision = "negotiate"
@@ -210,19 +213,22 @@ def run_task(env: FreelancerNegotiationEnv, llm_client: OpenAI, model_name: str,
             )
 
             step_result = env.step(action)
-            obs = step_result.observation
+            obs = getattr(step_result, "observation", None)
+            if obs is None:
+                raise RuntimeError("step() did not return an observation")
             steps_taken = step_index
             decision = action.action_type.value
 
-            step_reward = float(step_result.reward or 0.0)
+            step_reward = float(getattr(step_result, "reward", 0.0) or 0.0)
             total_reward += step_reward
             rewards.append(step_reward)
 
             state_obj = getattr(obs, "negotiation_state", None)
-            if hasattr(state_obj, "current_price"):
-                final_price = float(state_obj.current_price)
+            current_price = getattr(state_obj, "current_price", None)
+            if current_price is not None:
+                final_price = float(current_price)
 
-            done = bool(getattr(obs, "done", False) or step_result.done)
+            done = bool(getattr(obs, "done", False) or getattr(step_result, "done", False))
             error = _extract_step_error(obs)
             action_str = f"{decision}:{action.message}"
             _log_step(step=step_index, action=action_str, reward=step_reward, done=done, error=error)
