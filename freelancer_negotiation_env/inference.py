@@ -39,6 +39,7 @@ BENCHMARK_NAME = "freelancer_negotiation_env"
 MAX_STEPS_PER_TASK = 8
 RANDOM_SEED = 7
 SUCCESS_SCORE_THRESHOLD = 0.6
+LOG_SCORE_EPSILON = 0.01
 
 
 @dataclass
@@ -78,9 +79,13 @@ def _log_step(step: int, action: str, reward: float, done: bool, error: str | No
     )
 
 
-def _log_end(success: bool, steps: int, rewards: list[float]) -> None:
+def _clamp_open01(value: float) -> float:
+    return max(LOG_SCORE_EPSILON, min(1.0 - LOG_SCORE_EPSILON, value))
+
+
+def _log_end(success: bool, steps: int, score: float, rewards: list[float]) -> None:
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
-    print(f"[END] success={_bool_text(success)} steps={steps} rewards={rewards_str}", flush=True)
+    print(f"[END] success={_bool_text(success)} steps={steps} score={score:.3f} rewards={rewards_str}", flush=True)
 
 
 def _build_policy_prompt(task: TaskDefinition, observation: dict[str, object], step_index: int) -> str:
@@ -263,7 +268,7 @@ def run_task(env: Any, llm_client: OpenAI, model_name: str, task: TaskDefinition
             success=success,
         )
     finally:
-        _log_end(success=success, steps=steps_taken, rewards=rewards)
+        _log_end(success=success, steps=steps_taken, score=_clamp_open01(grader_score), rewards=rewards)
 
 
 def main() -> None:
