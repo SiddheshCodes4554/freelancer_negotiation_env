@@ -124,7 +124,9 @@ TASKS: dict[str, TaskDefinition] = {
 }
 
 
-_SCORE_EPSILON = 1e-4
+# Keep a practical margin away from exact 0/1 so downstream rounding in
+# external validators cannot collapse strict-range scores to boundary values.
+_SCORE_EPSILON = 1e-2
 
 
 def _clamp01(value: float) -> float:
