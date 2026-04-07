@@ -18,6 +18,7 @@ Each grader evaluates:
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from typing import Literal
@@ -132,6 +133,8 @@ def _clamp01(value: float) -> float:
 
 def _clamp_open01(value: float) -> float:
     """Clamp score to strict open interval (0, 1)."""
+    if not math.isfinite(value):
+        return 0.5
     return max(_SCORE_EPSILON, min(1.0 - _SCORE_EPSILON, value))
 
 
@@ -233,7 +236,7 @@ def grade_easy_task(result: EpisodeResult) -> float:
         result.step_count, max_steps
     )
 
-    return _clamp01(0.45 * price_score + 0.30 * decision_score + 0.25 * quality_score)
+    return _clamp_open01(0.45 * price_score + 0.30 * decision_score + 0.25 * quality_score)
 
 
 def grade_medium_task(result: EpisodeResult) -> float:
@@ -265,7 +268,7 @@ def grade_medium_task(result: EpisodeResult) -> float:
         + 0.20 * term_coverage
     )
 
-    return _clamp01(0.35 * price_score + 0.40 * decision_score + 0.25 * quality_score)
+    return _clamp_open01(0.35 * price_score + 0.40 * decision_score + 0.25 * quality_score)
 
 
 def grade_hard_task(result: EpisodeResult) -> float:
@@ -291,7 +294,7 @@ def grade_hard_task(result: EpisodeResult) -> float:
         + 0.20 * _efficiency_score(result.step_count, max_steps)
     )
 
-    return _clamp01(0.30 * price_score + 0.30 * decision_score + 0.40 * quality_score)
+    return _clamp_open01(0.30 * price_score + 0.30 * decision_score + 0.40 * quality_score)
 
 
 def grade_task(task_id: str, result: EpisodeResult) -> float:

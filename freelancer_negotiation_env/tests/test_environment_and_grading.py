@@ -2,7 +2,15 @@ from freelancer_negotiation_env.models import FreelancerNegotiationAction, Negot
 from freelancer_negotiation_env.server.freelancer_negotiation_env_environment import (
     FreelancerNegotiationEnvironment,
 )
-from freelancer_negotiation_env.tasks import EpisodeResult, get_tasks, grade_task
+from freelancer_negotiation_env.tasks import (
+    EpisodeResult,
+    TASKS,
+    get_tasks,
+    grade_easy_task,
+    grade_hard_task,
+    grade_medium_task,
+    grade_task,
+)
 
 
 def test_extract_price_from_text_inr_patterns() -> None:
@@ -42,7 +50,33 @@ def test_graders_are_bounded_for_all_tasks() -> None:
 
     for task in get_tasks():
         score = grade_task(task.task_id, sample)
-        assert 0.0 <= score <= 1.0
+        assert 0.0 < score < 1.0
+
+
+def test_direct_task_graders_are_strictly_open_interval() -> None:
+    low_quality = EpisodeResult(
+        final_price=None,
+        decision="accept",
+        conversation_history=[],
+        step_count=0,
+        client_type="normal",
+    )
+    high_quality = EpisodeResult(
+        final_price=float(TASKS["easy"].expected_outcome["ideal_price"]),
+        decision="accept",
+        conversation_history=[
+            "freelancer: Scope, budget, timeline, and contract are aligned at Rs 1250.",
+            "client: Great, proceeding now.",
+        ],
+        step_count=1,
+        client_type="normal",
+    )
+
+    for grader in (grade_easy_task, grade_medium_task, grade_hard_task):
+        lo = grader(low_quality)
+        hi = grader(high_quality)
+        assert 0.0 < lo < 1.0
+        assert 0.0 < hi < 1.0
 
 
 def test_memory_summary_keeps_recent_three_deals() -> None:
