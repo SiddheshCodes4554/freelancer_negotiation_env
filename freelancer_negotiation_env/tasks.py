@@ -123,8 +123,16 @@ TASKS: dict[str, TaskDefinition] = {
 }
 
 
+_SCORE_EPSILON = 1e-4
+
+
 def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, value))
+
+
+def _clamp_open01(value: float) -> float:
+    """Clamp score to strict open interval (0, 1)."""
+    return max(_SCORE_EPSILON, min(1.0 - _SCORE_EPSILON, value))
 
 
 def _normalized_history(history: list[str]) -> list[str]:
@@ -287,14 +295,14 @@ def grade_hard_task(result: EpisodeResult) -> float:
 
 
 def grade_task(task_id: str, result: EpisodeResult) -> float:
-    """Grade a task deterministically and return a score in [0.0, 1.0]."""
+    """Grade a task deterministically and return a score in strict range (0.0, 1.0)."""
     normalized_id = task_id.strip().lower()
     if normalized_id == "easy":
-        return grade_easy_task(result)
+        return _clamp_open01(grade_easy_task(result))
     if normalized_id == "medium":
-        return grade_medium_task(result)
+        return _clamp_open01(grade_medium_task(result))
     if normalized_id == "hard":
-        return grade_hard_task(result)
+        return _clamp_open01(grade_hard_task(result))
     raise ValueError(f"Unknown task_id: {task_id}")
 
 
