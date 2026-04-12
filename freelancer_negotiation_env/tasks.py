@@ -19,7 +19,6 @@ Each grader evaluates:
 from __future__ import annotations
 
 import math
-import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -55,69 +54,68 @@ TASKS: dict[str, TaskDefinition] = {
     "easy": TaskDefinition(
         task_id="easy",
         difficulty="easy",
-        title="Straightforward Normal Client",
-        description="Simple client with aligned expectations and moderate budget.",
+        title="High Budget Easy Deal",
+        description="Client has healthy budget and expects a quick professional agreement.",
         initial_state={
-            "current_price": 1250.0,
-            "client_budget": 1300.0,
+            "current_price": 1400.0,
+            "client_budget": 2200.0,
             "deadline": "2026-04-30",
             "conversation_history": [
-                "client: I have a clear website brief and a budget around $1300.",
-                "client: If scope is clear and timeline is realistic, I can move quickly.",
+                "client: I have a healthy budget and want to close quickly.",
+                "client: Share a fair quote and timeline and we can proceed.",
             ],
-            "client_type": "normal",
+            "client_type": "premium",
             "revisions": 1,
         },
         expected_outcome={
             "target_decision": "accept",
-            "ideal_price": 1250.0,
-            "acceptable_price_range": [1150.0, 1350.0],
-            "max_steps_for_efficiency": 4,
+            "ideal_price": 1500.0,
+            "max_steps_for_efficiency": 3,
         },
     ),
     "medium": TaskDefinition(
         task_id="medium",
         difficulty="medium",
-        title="Budget-Time Conflict",
-        description="Conflicting requirements: low budget and tight deadline.",
+        title="Tight Budget Negotiation",
+        description="Budget is constrained, so the agent must negotiate terms effectively.",
         initial_state={
-            "current_price": 1400.0,
-            "client_budget": 800.0,
-            "deadline": "2026-04-05",
+            "current_price": 1350.0,
+            "client_budget": 1050.0,
+            "deadline": "2026-04-10",
             "conversation_history": [
-                "client: I need this in one week and my budget is $800.",
-                "client: It must include full QA and post-launch support.",
+                "client: My budget is tight, but I still need a quality delivery.",
+                "client: Can we negotiate scope and price to make this work?",
             ],
-            "client_type": "cheap",
+            "client_type": "normal",
             "revisions": 2,
         },
         expected_outcome={
-            "target_decision": "reject",
-            "min_viable_price": 1100.0,
+            "target_decision": "negotiate",
+            "ideal_price": 1200.0,
             "max_steps_for_efficiency": 5,
-            "quality_signals": ["scope", "timeline", "tradeoff", "budget"],
         },
     ),
     "hard": TaskDefinition(
         task_id="hard",
         difficulty="hard",
-        title="Toxic Unclear Client",
-        description="Toxic client with unclear requirements and repeated revision pressure.",
+        title="Low Budget High Expectations",
+        description="Client asks for premium outcomes with unrealistic budget and scope demands.",
         initial_state={
-            "current_price": 1700.0,
-            "client_budget": 950.0,
+            "current_price": 1800.0,
+            "client_budget": 700.0,
             "deadline": "2026-04-08",
             "conversation_history": [
-                "client: I want premium work, unlimited revisions, and low cost.",
-                "client: Details are flexible, just make it perfect and fast.",
+                "client: I need premium quality fast, but my budget is very low.",
+                "client: I also expect extra changes without increasing budget.",
             ],
             "client_type": "toxic",
             "revisions": 3,
         },
         expected_outcome={
             "target_decision": "reject",
-            "ideal_price": 1650.0,
-            "max_steps_for_efficiency": 6,
+            "ideal_price": 1700.0,
+            "min_viable_price": 1450.0,
+            "max_steps_for_efficiency": 5,
             "boundary_keywords": ["scope", "paid", "revision", "contract", "milestone"],
         },
     ),
@@ -140,163 +138,100 @@ def _clamp_open01(value: float) -> float:
     return max(_SCORE_EPSILON, min(1.0 - _SCORE_EPSILON, value))
 
 
-def _normalized_history(history: list[str]) -> list[str]:
-    return [re.sub(r"\s+", " ", msg.strip().lower()) for msg in history if msg.strip()]
-
-
-def _message_quality_score(history: list[str]) -> float:
-    """Score message quality based on relevance and repetition patterns."""
-    normalized = _normalized_history(history)
-    if not normalized:
-        return 0.0
-
-    repetitive_count = 0
-    irrelevant_count = 0
-    informative_count = 0
-
-    seen: set[str] = set()
-    irrelevant_markers = ("asdf", "lorem", "blah", "whatever", "idk", "...", "??")
-    informative_markers = ("scope", "timeline", "budget", "price", "deliver", "revision", "contract")
-
-    for msg in normalized:
-        if msg in seen:
-            repetitive_count += 1
-        seen.add(msg)
-
-        if len(msg) < 12 or any(tok in msg for tok in irrelevant_markers):
-            irrelevant_count += 1
-
-        if any(tok in msg for tok in informative_markers) or re.search(r"\$?\d+", msg):
-            informative_count += 1
-
-    total = len(normalized)
-    repetitive_penalty = repetitive_count / total
-    irrelevant_penalty = irrelevant_count / total
-    informative_ratio = informative_count / total
-
-    score = 0.2 + 0.8 * informative_ratio - 0.6 * repetitive_penalty - 0.5 * irrelevant_penalty
-    return _clamp01(score)
-
-
-def _efficiency_score(step_count: int, max_steps: int) -> float:
-    if step_count <= 0:
-        return 0.0
-    if step_count <= max_steps:
-        return 1.0
-    overflow = step_count - max_steps
-    return _clamp01(1.0 - 0.2 * overflow)
-
-
-def _price_quality_score(final_price: float | None, ideal_price: float, lo: float, hi: float) -> float:
-    if final_price is None:
-        return 0.0
-
-    if lo <= final_price <= hi:
-        delta = abs(final_price - ideal_price)
-        tolerance = max((hi - lo) / 2.0, 1.0)
-        return _clamp01(1.0 - (delta / tolerance) * 0.5)
-
-    if final_price < lo:
-        gap = (lo - final_price) / max(lo, 1.0)
-    else:
-        gap = (final_price - hi) / max(hi, 1.0)
-    return _clamp01(0.6 - 1.5 * gap)
-
-
-def _decision_match_score(actual: DecisionType, expected: DecisionType) -> float:
-    if actual == expected:
-        return 1.0
-    if expected == "reject" and actual == "negotiate":
-        return 0.4
-    if expected == "accept" and actual == "negotiate":
-        return 0.5
-    return 0.0
-
-
-def _toxic_handling_score(history: list[str], decision: DecisionType) -> float:
-    normalized = " ".join(_normalized_history(history))
-    boundary_markers = ("scope", "paid", "revision", "contract", "milestone", "out of scope")
-    has_boundaries = any(tok in normalized for tok in boundary_markers)
-
-    decision_component = 1.0 if decision == "reject" else 0.5 if decision == "negotiate" else 0.2
-    boundary_component = 1.0 if has_boundaries else 0.2
-    return _clamp01(0.6 * decision_component + 0.4 * boundary_component)
+def _has_boundary_terms(history: list[str]) -> bool:
+    text = " ".join(history).lower()
+    for term in ("scope", "paid", "revision", "contract", "milestone"):
+        if term in text:
+            return True
+    return False
 
 
 def grade_easy_task(result: EpisodeResult) -> float:
-    """Grade easy scenario with emphasis on fair acceptance and concise negotiation."""
+    """Simple deterministic grader for easy task."""
     task = TASKS["easy"]
     expected = task.expected_outcome
-
-    ideal_price = float(expected["ideal_price"])
-    lo, hi = expected["acceptable_price_range"]
+    ideal = float(expected["ideal_price"])
     max_steps = int(expected["max_steps_for_efficiency"])
 
-    price_score = _price_quality_score(result.final_price, ideal_price=ideal_price, lo=float(lo), hi=float(hi))
-    decision_score = _decision_match_score(result.decision, expected="accept")
-    quality_score = 0.6 * _message_quality_score(result.conversation_history) + 0.4 * _efficiency_score(
-        result.step_count, max_steps
-    )
+    score = 0.2
+    if result.decision == "accept":
+        score += 0.4
+    elif result.decision == "negotiate":
+        score += 0.2
 
-    return _clamp_open01(0.45 * price_score + 0.30 * decision_score + 0.25 * quality_score)
+    if result.final_price is not None:
+        if result.final_price >= ideal * 0.9:
+            score += 0.3
+        elif result.final_price >= ideal * 0.7:
+            score += 0.15
+
+    if 0 < result.step_count <= max_steps:
+        score += 0.1
+
+    return _clamp_open01(_clamp01(score))
 
 
 def grade_medium_task(result: EpisodeResult) -> float:
-    """Grade medium scenario with focus on decision quality under conflicting constraints."""
+    """Simple deterministic grader for medium task."""
     task = TASKS["medium"]
     expected = task.expected_outcome
-
-    min_viable = float(expected["min_viable_price"])
+    ideal = float(expected["ideal_price"])
     max_steps = int(expected["max_steps_for_efficiency"])
 
-    if result.decision == "reject":
-        price_score = 1.0
+    score = 0.15
+    if result.decision == "negotiate":
+        score += 0.35
+    elif result.decision == "accept":
+        score += 0.25
     else:
-        if result.final_price is None:
-            price_score = 0.0
-        else:
-            ratio = (result.final_price - min_viable) / max(min_viable, 1.0)
-            price_score = _clamp01(0.4 + ratio)
+        score += 0.1
 
-    decision_score = _decision_match_score(result.decision, expected="reject")
+    if result.final_price is not None:
+        if result.final_price >= ideal * 0.9:
+            score += 0.25
+        elif result.final_price >= ideal * 0.75:
+            score += 0.15
+    else:
+        score += 0.05
 
-    history_joined = " ".join(_normalized_history(result.conversation_history))
-    expected_terms = expected["quality_signals"]
-    term_coverage = sum(1 for term in expected_terms if term in history_joined) / max(len(expected_terms), 1)
+    if 2 <= result.step_count <= max_steps:
+        score += 0.2
+    elif result.step_count > 0:
+        score += 0.1
 
-    quality_score = _clamp01(
-        0.45 * _message_quality_score(result.conversation_history)
-        + 0.35 * _efficiency_score(result.step_count, max_steps)
-        + 0.20 * term_coverage
-    )
+    if len(result.conversation_history) >= 2:
+        score += 0.1
 
-    return _clamp_open01(0.35 * price_score + 0.40 * decision_score + 0.25 * quality_score)
+    return _clamp_open01(_clamp01(score))
 
 
 def grade_hard_task(result: EpisodeResult) -> float:
-    """Grade hard toxic-client scenario with emphasis on boundary-setting behavior."""
+    """Simple deterministic grader for hard task."""
     task = TASKS["hard"]
     expected = task.expected_outcome
-
-    ideal_price = float(expected["ideal_price"])
+    min_viable = float(expected["min_viable_price"])
     max_steps = int(expected["max_steps_for_efficiency"])
 
-    # For toxic scenarios, rejecting a bad deal can still be optimal.
+    score = 0.1
     if result.decision == "reject":
-        price_score = 1.0
+        score += 0.45
+    elif result.decision == "negotiate":
+        score += 0.2
+
+    if result.final_price is None and result.decision == "reject":
+        score += 0.25
+    elif result.final_price is not None and result.final_price >= min_viable:
+        score += 0.25
     else:
-        price_score = _price_quality_score(result.final_price, ideal_price, lo=1450.0, hi=1800.0)
+        score += 0.05
 
-    decision_score = _decision_match_score(result.decision, expected="reject")
+    if 0 < result.step_count <= max_steps:
+        score += 0.1
 
-    toxic_quality = _toxic_handling_score(result.conversation_history, result.decision)
-    quality_score = _clamp01(
-        0.55 * toxic_quality
-        + 0.25 * _message_quality_score(result.conversation_history)
-        + 0.20 * _efficiency_score(result.step_count, max_steps)
-    )
+    if _has_boundary_terms(result.conversation_history):
+        score += 0.1
 
-    return _clamp_open01(0.30 * price_score + 0.30 * decision_score + 0.40 * quality_score)
+    return _clamp_open01(_clamp01(score))
 
 
 def grade_task(task_id: str, result: EpisodeResult) -> float:
